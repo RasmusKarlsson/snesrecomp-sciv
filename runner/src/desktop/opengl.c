@@ -50,6 +50,9 @@ static unsigned int g_program, g_flash_program, g_VAO;
 static GlTextureWithSize g_texture;
 static GlslShader *g_glsl_shader;
 static bool g_want_screenshot;
+static SDL_GLContext g_context;
+static void (*g_overlay_render)(void *, int, int);
+static void *g_overlay_opaque;
 static double g_screenshot_flash_start_time = -1.0;
 static const double kScreenshotFlashSeconds = 0.15;
 
@@ -84,8 +87,7 @@ static void GL_APIENTRY MessageCallback(GLenum source,
 
 static bool OpenGLRenderer_Init(SDL_Window *window) {
   g_window = window;
-  SDL_GLContext context = SDL_GL_CreateContext(window);
-  (void)context;
+  g_context = SDL_GL_CreateContext(window);
 
   SDL_GL_SetSwapInterval(g_vsync_override >= 0
                              ? g_vsync_override
@@ -217,6 +219,17 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
 }
 
 static void OpenGLRenderer_Destroy(void) {
+  g_overlay_render = NULL;
+  g_overlay_opaque = NULL;
+  if (g_context) SDL_GL_DestroyContext(g_context);
+  g_context = NULL;
+}
+
+void *OpenGLRenderer_GetContext(void) { return g_context; }
+
+void OpenGLRenderer_SetOverlay(void (*render)(void *, int, int), void *opaque) {
+  g_overlay_render = render;
+  g_overlay_opaque = opaque;
 }
 
 static void OpenGLRenderer_GetOutputSize(int *width, int *height) {
@@ -362,15 +375,20 @@ static void OpenGLRenderer_EndDraw(void) {
                       viewport.width, viewport.height);
   }
 
-  if (g_want_screenshot) {
-    g_want_screenshot = false;
-    SaveScreenshotBmp(drawable_width, drawable_height);
-  }
   if (g_screenshot_flash_start_time >= 0.0) {
     double now = MonotonicSeconds();
     glViewport(0, 0, drawable_width, drawable_height);
     if (!DrawScreenshotFlash(now - g_screenshot_flash_start_time))
       g_screenshot_flash_start_time = -1.0;
+  }
+
+  if (g_overlay_render) {
+    glViewport(0, 0, drawable_width, drawable_height);
+    g_overlay_render(g_overlay_opaque, drawable_width, drawable_height);
+  }
+  if (g_want_screenshot) {
+    g_want_screenshot = false;
+    SaveScreenshotBmp(drawable_width, drawable_height);
   }
 
   SDL_GL_SwapWindow(g_window);

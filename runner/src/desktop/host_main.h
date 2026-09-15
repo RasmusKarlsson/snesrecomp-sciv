@@ -89,6 +89,7 @@ typedef struct SnesDesktopHostGame {
   int state_menu_hotkeys;
   int display_aspect_supported; /* expose the three SNES pixel-aspect choices */
   int shader_supported;        /* expose GLSL presets (OpenGL presenter) */
+  int escape_settings;         /* Escape opens the in-game pause/settings UI */
 
   /* ── Hooks. Every one is optional. ────────────────────────────────────── */
 

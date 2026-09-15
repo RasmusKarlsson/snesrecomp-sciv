@@ -67,6 +67,12 @@
 #include "host_report.h"
 #include "post_mortem.h"
 #include "widescreen.h"
+#if defined(RECOMP_LAUNCHER)
+#include "recomp_runtime_ui.h"
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+#include "runtime_settings_imgui.h"
+#endif
+#endif
 #include "snes_savestate_menu.h"
 #include "snes_rewind.h"
 #include "snes_overlay_draw.h"
@@ -1271,6 +1277,9 @@ static bool HandleDeviceEvent(const SDL_Event *event) {
 static bool g_overlay_modal;
 static void SetAudioPaused(bool paused);
 static void ResetAudioTimeline(void);
+#if defined(RECOMP_LAUNCHER)
+static RecompRuntimeUi *g_runtime_settings;
+#endif
 
 /* Buttons still held when a panel closed, masked from the guest until each
  * is released. The button that closed the panel must not also act in the
@@ -1279,6 +1288,9 @@ static void ResetAudioTimeline(void);
  * module carries this guard for itself (snes_savestate_menu_filter_guest_input);
  * the rewind module does not, so the host applies it to both. */
 static uint32 g_overlay_release_mask;
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+static void RuntimeSettingsKeyDown(int key, int repeat);
+#endif
 static void OverlayNoteClosed(void) {
   g_overlay_release_mask |= OverlayNavInputs();
 }
@@ -1295,6 +1307,10 @@ static uint32 OverlayFilterGuestInput(uint32 inputs) {
 static void PumpOverlayEvents(bool *running, void (*key_down)(int key, int repeat)) {
   SDL_Event event;
   while (SDL_PollEvent(&event)) {
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+    if (key_down == RuntimeSettingsKeyDown)
+      Cv4RuntimeSettingsImGuiProcessEvent(&event);
+#endif
     if (HandleDeviceEvent(&event))
       continue;
     switch (event.type) {
@@ -1565,6 +1581,11 @@ static void PresentFrozenWithOverlay(void) {
                                0, draw_h - strip_h, draw_w, strip_h);
     }
   }
+#if defined(RECOMP_LAUNCHER) && !defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+  if (g_runtime_settings && recomp_runtime_ui_is_open(g_runtime_settings))
+    recomp_runtime_ui_render_argb8888(g_runtime_settings, pixel_buffer,
+                                      draw_w, draw_h, pitch);
+#endif
   ComposeOsd(pixel_buffer, pitch, draw_w, draw_h, draw_w >= 512 ? 1 : 2);
   /* SNESRECOMP_OVERLAY_DUMP=<path> (browser) / SNESRECOMP_REWIND_DUMP=<path>
    * (filmstrip): write the composited overlay frame as a PPM. The overlays can only be driven by a human, so this is the only way
@@ -1595,6 +1616,235 @@ static void PresentFrozenWithOverlay(void) {
 
   g_renderer_funcs.EndDraw();
 }
+
+#if defined(RECOMP_LAUNCHER)
+static int RuntimeSettingsGet(void *context, const RecompRuntimeUiItem *item,
+                              int *value_out) {
+  (void)context;
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VIEW_MODE)) {
+    *value_out = g_config.widescreen ? RECOMP_RUNTIME_UI_VIEW_FIXED_16_9
+                                     : RECOMP_RUNTIME_UI_VIEW_NATIVE;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN)) {
+    *value_out = (g_win_flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE)) {
+    *value_out = g_current_window_scale;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER)) {
+    *value_out = g_config.linear_filtering;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO)) {
+    *value_out = g_config.enable_audio;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME)) {
+    *value_out = g_config.volume;
+    return 1;
+  }
+  if (!strcmp(item->key, "graphics.no_sprite_limits")) {
+    *value_out = g_config.no_sprite_limits;
+    return 1;
+  }
+  if (!strcmp(item->key, "graphics.frame_blend")) {
+    *value_out = g_config.frame_blend;
+    return 1;
+  }
+  if (!strcmp(item->key, "emulation.run_ahead")) {
+    *value_out = g_config.run_ahead;
+    return 1;
+  }
+  return 0;
+}
+
+static int RuntimeSettingsSet(void *context, const RecompRuntimeUiItem *item,
+                              int value) {
+  (void)context;
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VIEW_MODE)) {
+    snesrecomp_desktop_set_widescreen(value != RECOMP_RUNTIME_UI_VIEW_NATIVE);
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN)) {
+    bool current = (g_win_flags & SNESRECOMP_SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    if (current != (value != 0)) HandleCommand(kKeys_Fullscreen, true);
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE)) {
+    ChangeWindowScale(value - g_current_window_scale);
+    g_config.window_scale = (uint8)g_current_window_scale;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER)) {
+    g_config.linear_filtering = value != 0;
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO)) {
+    g_config.enable_audio = value != 0;
+    SetAudioPaused(g_paused || !g_config.enable_audio);
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME)) {
+    g_config.volume = IntMin(IntMax(value, 0), 100);
+    ApplyVolume();
+    g_volume_changed = true;
+    return 1;
+  }
+  if (!strcmp(item->key, "graphics.no_sprite_limits")) {
+    g_config.no_sprite_limits = value != 0;
+    if (g_config.no_sprite_limits)
+      g_ppu_render_flags |= kPpuRenderFlags_NoSpriteLimits;
+    else
+      g_ppu_render_flags &= ~kPpuRenderFlags_NoSpriteLimits;
+    return 1;
+  }
+  if (!strcmp(item->key, "graphics.frame_blend")) {
+    g_config.frame_blend = value != 0;
+    FrameBlendConfigure();
+    return 1;
+  }
+  if (!strcmp(item->key, "emulation.run_ahead")) {
+    g_config.run_ahead = IntMin(IntMax(value, 0), 2);
+    snes_runahead_set_frames(g_config.run_ahead);
+    snes_runahead_configure();
+    return 1;
+  }
+  return 0;
+}
+
+static int RuntimeSettingsAction(void *context,
+                                 const RecompRuntimeUiItem *item) {
+  (void)context;
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME)) {
+    recomp_runtime_ui_close(g_runtime_settings);
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_SAVE_STATE)) {
+    RtlSaveLoad(kSaveLoad_Save, 0);
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LOAD_STATE)) {
+    RtlSaveLoad(kSaveLoad_Load, 0);
+    GameReset();
+    recomp_runtime_ui_close(g_runtime_settings);
+    return 1;
+  }
+  if (!strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESET)) {
+    RtlReset(1);
+    GameReset();
+    recomp_runtime_ui_close(g_runtime_settings);
+    return 1;
+  }
+  return 0;
+}
+
+static void RuntimeSettingsSave(void *context) {
+  (void)context;
+  WriteConfigFile(g_active_config_file);
+}
+
+static void RuntimeSettingsKeyDown(int key, int repeat) {
+  RecompRuntimeUiInput input;
+  switch (key) {
+  case SDLK_ESCAPE:
+  case SDLK_BACKSPACE: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+  case SDLK_UP:        input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+  case SDLK_DOWN:      input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+  case SDLK_LEFT:      input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+  case SDLK_RIGHT:     input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+  case SDLK_RETURN:
+  case SDLK_SPACE:     input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+  default: return;
+  }
+  recomp_runtime_ui_handle_input(g_runtime_settings, input, 1, repeat);
+}
+
+static void RunRuntimeSettingsLoop(bool *running) {
+  uint32 prev_pad = 0;
+  unsigned frames = 0;
+  const bool selftest = HostGetenv("SETTINGS_SELFTEST") != NULL;
+  host_report_breadcrumb("settings overlay OPEN - guest and audio paused");
+  g_overlay_modal = true;
+  SetAudioPaused(true);
+  while (recomp_runtime_ui_is_open(g_runtime_settings) && *running) {
+    PumpOverlayEvents(running, &RuntimeSettingsKeyDown);
+    uint32 pad = OverlayNavInputs();
+    uint32 pressed = pad & ~prev_pad;
+    if (pressed & SNES_PAD_UP)
+      recomp_runtime_ui_handle_input(g_runtime_settings, RECOMP_RUNTIME_UI_INPUT_UP, 1, 0);
+    if (pressed & SNES_PAD_DOWN)
+      recomp_runtime_ui_handle_input(g_runtime_settings, RECOMP_RUNTIME_UI_INPUT_DOWN, 1, 0);
+    if (pressed & SNES_PAD_LEFT)
+      recomp_runtime_ui_handle_input(g_runtime_settings, RECOMP_RUNTIME_UI_INPUT_LEFT, 1, 0);
+    if (pressed & SNES_PAD_RIGHT)
+      recomp_runtime_ui_handle_input(g_runtime_settings, RECOMP_RUNTIME_UI_INPUT_RIGHT, 1, 0);
+    if (pressed & SNES_PAD_A)
+      recomp_runtime_ui_handle_input(g_runtime_settings, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+    if (pressed & SNES_PAD_B)
+      recomp_runtime_ui_handle_input(g_runtime_settings, RECOMP_RUNTIME_UI_INPUT_BACK, 1, 0);
+    prev_pad = pad;
+    PresentFrozenWithOverlay();
+    if (selftest && frames == 2) RequestScreenshot();
+    if (selftest && frames == 20) recomp_runtime_ui_close(g_runtime_settings);
+    SDL_Delay(8);
+    frames++;
+  }
+  g_overlay_modal = false;
+  ResetAudioTimeline();
+  SetAudioPaused(g_paused);
+  OverlayNoteClosed();
+  host_report_breadcrumb("settings overlay CLOSED after %u pumps", frames);
+}
+
+static void RuntimeSettingsInit(void) {
+  if (!g_game->escape_settings || g_runtime_settings) return;
+  RecompRuntimeUiStandardConfig config;
+  static const RecompRuntimeUiItem extras[] = {
+    { "graphics.no_sprite_limits", "Graphics", "Remove sprite limits",
+      "Avoid SNES scanline sprite dropouts in the wider view.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "graphics.frame_blend", "Graphics", "Frame blending",
+      "Blend alternating frames for transparency effects.",
+      RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
+    { "emulation.run_ahead", "Emulation", "Run-ahead",
+      "Reduce input latency; 1 frame is recommended.",
+      RECOMP_RUNTIME_UI_INT, 0, 2, 1, NULL, 0, NULL },
+  };
+  memset(&config, 0, sizeof(config));
+  config.menu.title = g_game->display_name;
+  config.menu.subtitle = "Paused";
+  config.menu.theme = "snes";
+  config.menu.accept_label = "Enter / A";
+  config.menu.back_label = "Escape / B";
+  config.menu.callbacks.get_value = &RuntimeSettingsGet;
+  config.menu.callbacks.set_value = &RuntimeSettingsSet;
+  config.menu.callbacks.run_action = &RuntimeSettingsAction;
+  config.menu.callbacks.save = &RuntimeSettingsSave;
+  config.features = RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
+                    RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
+                    RECOMP_RUNTIME_UI_STANDARD_VIEW_MODE |
+                    RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
+                    RECOMP_RUNTIME_UI_STANDARD_AUDIO |
+                    RECOMP_RUNTIME_UI_STANDARD_VOLUME |
+                    RECOMP_RUNTIME_UI_STANDARD_RESUME |
+                    RECOMP_RUNTIME_UI_STANDARD_SAVE_STATE |
+                    RECOMP_RUNTIME_UI_STANDARD_LOAD_STATE |
+                    RECOMP_RUNTIME_UI_STANDARD_RESET;
+  config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE |
+                      RECOMP_RUNTIME_UI_VIEW_MODE_FIXED_16_9;
+  config.native_view_label = "Original 4:3";
+  config.fixed_view_label = "Widescreen 16:9";
+  config.window_scale_max = 6;
+  config.extra_items = extras;
+  config.extra_item_count = sizeof(extras) / sizeof(extras[0]);
+  g_runtime_settings = recomp_runtime_ui_create_standard(&config);
+  if (!g_runtime_settings)
+    fprintf(stderr, "[settings] unable to create runtime menu\n");
+}
+#endif
 
 /* Save-state browser's modal pump. The guest is FROZEN throughout: this loop
  * never calls RtlRunFrame and never calls the game's draw_ppu_frame, which is
@@ -2645,6 +2895,13 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
       g_current_window_scale * WindowBaseHeight();
 
   RendererApply(RendererChoice());
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+  /* Dear ImGui is submitted directly into this presenter's GL backbuffer. */
+  if (game->escape_settings) {
+    g_config.output_method = kOutputMethod_OpenGL;
+    snprintf(g_config.renderer, sizeof(g_config.renderer), "opengl");
+  }
+#endif
 #ifndef __ANDROID__
   if (g_config.output_method == kOutputMethod_OpenGL) {
     g_win_flags |= SDL_WINDOW_OPENGL;
@@ -2760,6 +3017,14 @@ error_reading:;
                            g_config.output_method);
     return 1;
   }
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+  if (game->escape_settings) {
+    if (!Cv4RuntimeSettingsImGuiInit(window, OpenGLRenderer_GetContext())) {
+      host_report_breadcrumb("Dear ImGui settings initialization failed");
+      return 1;
+    }
+  }
+#endif
   host_report_breadcrumb("renderer initialized: %s",
       g_config.output_method == kOutputMethod_OpenGL ? "opengl" :
       g_config.output_method == kOutputMethod_SDLSoftware ? "sdl-software" : "sdl");
@@ -2919,6 +3184,13 @@ error_reading:;
   /* Rewind ring: reads the env overrides and reserves slot headers; the
    * buffer itself is allocated lazily on the first capture. */
   snes_rewind_configure();
+#if defined(RECOMP_LAUNCHER)
+  RuntimeSettingsInit();
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+  OpenGLRenderer_SetOverlay(&Cv4RuntimeSettingsImGuiRender,
+                            g_runtime_settings);
+#endif
+#endif
   /* SNESRECOMP_OSD_FPS=1 (or [General] DisplayPerfInTitle): start with the
    * FPS readout up. */
   {
@@ -2960,6 +3232,14 @@ error_reading:;
         }
         break;
       case SDL_KEYDOWN:
+#if defined(RECOMP_LAUNCHER)
+        if (game->escape_settings &&
+            SNESRECOMP_SDL_EVENT_KEY(event) == SDLK_ESCAPE &&
+            g_runtime_settings) {
+          recomp_runtime_ui_open(g_runtime_settings);
+          break;
+        }
+#endif
         HandleInput(SNESRECOMP_SDL_EVENT_KEY(event),
                     SNESRECOMP_SDL_EVENT_MOD(event), true);
         break;
@@ -2975,6 +3255,25 @@ error_reading:;
     }
     if (!running)
       break;
+#if defined(RECOMP_LAUNCHER)
+    {
+      static long settings_demo = -2;
+      static bool settings_demo_done;
+      if (settings_demo == -2) {
+        const char *v = HostGetenv("SETTINGS_SELFTEST");
+        settings_demo = v ? strtol(v, NULL, 0) : -1;
+      }
+      if (!settings_demo_done && settings_demo >= 0 &&
+          (long)frameCtr >= settings_demo && g_runtime_settings) {
+        settings_demo_done = true;
+        recomp_runtime_ui_open(g_runtime_settings);
+      }
+    }
+    if (g_runtime_settings && recomp_runtime_ui_is_open(g_runtime_settings)) {
+      RunRuntimeSettingsLoop(&running);
+      continue;
+    }
+#endif
     OverlaySelftestPadMainTick(frameCtr);
     /* SNESRECOMP_VOLUME_DEMO=<frame>: press VolumeDown once at that frame, so
      * a headless screenshot can show the bar. */
@@ -3359,6 +3658,14 @@ error_reading:;
   RtlWriteSram();
   snes_rewind_shutdown();
   snes_runahead_shutdown();
+#if defined(RECOMP_LAUNCHER)
+#if defined(SNESRECOMP_IMGUI_ESCAPE_SETTINGS)
+  OpenGLRenderer_SetOverlay(NULL, NULL);
+  Cv4RuntimeSettingsImGuiShutdown();
+#endif
+  recomp_runtime_ui_destroy(g_runtime_settings);
+  g_runtime_settings = NULL;
+#endif
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
   if (g_blend) recomp_frame_blend_destroy(g_blend);
 #endif

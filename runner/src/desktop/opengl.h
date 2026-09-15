@@ -20,6 +20,10 @@ void snesrecomp_opengl_set_vsync(int enable);
 /* Capture the next fully composited OpenGL frame to screenshots/*.bmp. */
 void OpenGLRenderer_RequestScreenshot(void);
 
+/* Optional high-resolution overlay rendered after the game and before swap. */
+void *OpenGLRenderer_GetContext(void);
+void OpenGLRenderer_SetOverlay(void (*render)(void *, int, int), void *opaque);
+
 #ifdef __cplusplus
 }
 #endif
