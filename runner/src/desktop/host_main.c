@@ -1810,7 +1810,7 @@ static void RuntimeSettingsInit(void) {
       "Blend alternating frames for transparency effects.",
       RECOMP_RUNTIME_UI_BOOL, 0, 1, 1, NULL, 0, NULL },
     { "emulation.run_ahead", "Emulation", "Run-ahead",
-      "Reduce input latency; 1 frame is recommended.",
+      "Requires rollback-compatible game execution; unsupported ports disable this automatically.",
       RECOMP_RUNTIME_UI_INT, 0, 2, 1, NULL, 0, NULL },
   };
   memset(&config, 0, sizeof(config));

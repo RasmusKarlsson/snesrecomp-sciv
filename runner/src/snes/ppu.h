@@ -154,6 +154,13 @@ typedef struct WindowLayer {
 #define PPU_SAVESTATE_MEM_SIZE 0x10420
 
 struct Ppu {
+  /* Optional host body image. Presentation state only; never serialized. */
+  const uint32_t *hostObjPixels;
+  int hostObjX, hostObjY, hostObjWidth, hostObjHeight, hostObjStride;
+  uint16_t hostObjPriority;
+  uint8_t hostObjSlot, hostObjMask[16];
+  uint8_t hostObjOwners[kPpuBufWidth];
+  uint32_t hostObjColors[kPpuBufWidth];
   // Snes registers. Saved to snapshot. Need to be stable
   // -- START OF SNAPSHOT, 0x40 bytes
   uint8 inidisp;

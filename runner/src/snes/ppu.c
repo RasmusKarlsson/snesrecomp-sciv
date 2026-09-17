@@ -729,10 +729,30 @@ void ppu_runLine(Ppu* ppu, int line) {
 
     // evaluate sprites
     ClearBackdrop(ppu, &ppu->objBuffer);
+    if (ppu->hostObjPixels) {
+      memset(ppu->hostObjOwners, 255, sizeof(ppu->hostObjOwners));
+      memset(ppu->hostObjColors, 0, sizeof(ppu->hostObjColors));
+    }
     if (ppu->overlayRenderBuffer[kPpuOverlaySource_Obj])
       memset(&ppu->overlayBuffers[kPpuOverlaySource_Obj], 0,
              sizeof(ppu->overlayBuffers[kPpuOverlaySource_Obj]));
     ppu->lineHasSprites = !PPU_forcedBlank(ppu) && ppu_evaluateSprites(ppu, line - 1);
+    if (ppu->hostObjPixels && !PPU_forcedBlank(ppu)) {
+      int row = line - 1 - ppu->hostObjY;
+      if (row >= 0 && row < ppu->hostObjHeight) {
+        for (int col = 0; col < ppu->hostObjWidth; ++col) {
+          int x = ppu->hostObjX + col;
+          if (x < -(int)ppu->extraLeftCur || x >= 256 + ppu->extraRightCur) continue;
+          int di = x + kPpuExtraLeftRight;
+          uint32 rgba = ppu->hostObjPixels[row * ppu->hostObjStride + col];
+          if ((rgba >> 24) < 128 || ppu->hostObjOwners[di] < ppu->hostObjSlot) continue;
+          ppu->hostObjColors[di] = rgba;
+          /* OBJ palette index zero cannot occur in an opaque native sprite. */
+          ppu->objBuffer.data[di] = ppu->hostObjPriority | 0x80;
+          ppu->lineHasSprites = true;
+        }
+      }
+    }
 
     if (ppu->renderFlags & kPpuRenderFlags_NewRenderer) {
       PPU_T0; PpuDrawWholeLine(ppu, line); PPU_ACC(g_ppu_sec_line_ms);
@@ -2022,6 +2042,15 @@ static void PpuDrawSprites(Ppu *ppu, uint y, uint sub, bool clear_backdrop) {
   }
 }
 
+static uint32 PpuHostColor(Ppu *ppu, uint16 pixel, unsigned x) {
+  if (ppu->hostObjPixels && pixel == (ppu->hostObjPriority | 0x80) &&
+      (ppu->hostObjColors[x] >> 24)) {
+    uint32 c = ppu->hostObjColors[x];
+    return ((c >> 19) & 31) | (((c >> 11) & 31) << 5) | (((c >> 3) & 31) << 10);
+  }
+  return ppu->cgram[pixel & 255];
+}
+
 static bool PpuOverlayActiveOnLine(Ppu *ppu, PpuOverlaySource source,
                                    int screen_y) {
   if ((unsigned)source >= kPpuOverlaySource_Count ||
@@ -2339,10 +2368,16 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
         if (outside_world && !keep_hud) {
           dst[0] = 0;
         } else {
-          uint32 color = ppu->cgram[pixel & 0xff];
+          uint32 color = PpuHostColor(ppu, pixel, i);
           dst[0] = ppu->brightnessMult[color & clip_color_mask] << 16 |
             ppu->brightnessMult[(color >> 5) & clip_color_mask] << 8 |
             ppu->brightnessMult[(color >> 10) & clip_color_mask];
+          if (clip_color_mask && ppu->hostObjPixels &&
+              pixel == (ppu->hostObjPriority | 0x80) && (ppu->hostObjColors[i] >> 24)) {
+            uint32 c = ppu->hostObjColors[i], b = PPU_brightness(ppu);
+            dst[0] = (((c >> 16 & 255) * b / 15) << 16) |
+                     (((c >> 8 & 255) * b / 15) << 8) | ((c & 255) * b / 15);
+          }
         }
       } while (dst++, ++i < right);
     } else {
@@ -2363,7 +2398,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
         if (outside_world && !keep_hud) {
           dst[0] = 0;
         } else {
-          uint32 color = ppu->cgram[pixel & 0xff], color2;
+          uint32 color = PpuHostColor(ppu, pixel, i), color2;
           uint32 r = color & clip_color_mask;
           uint32 g = (color >> 5) & clip_color_mask;
           uint32 b = (color >> 10) & clip_color_mask;
@@ -2371,7 +2406,7 @@ static NOINLINE void PpuDrawWholeLine(Ppu *ppu, uint y) {
           if (math_enabled_cur & (1 << main_layer)) {
             if (math_enabled_cur & 0x100) {  // addSubscreen ?
               if ((ppu->bgBuffers[1].data[i] & 0xff) != 0)
-                color2 = ppu->cgram[ppu->bgBuffers[1].data[i] & 0xff], color_map = half_color_map;
+                color2 = PpuHostColor(ppu, ppu->bgBuffers[1].data[i], i), color_map = half_color_map;
               else  // Don't halve if PPU_addSubscreen(ppu) && backdrop
                 color2 = fixed_color;
             } else {
@@ -2542,6 +2577,8 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
 
   for(int i = spritesFound; i > 0; i--) {
     index = foundSprites[i - 1];
+    if (ppu->hostObjPixels &&
+        (ppu->hostObjMask[(index >> 1) >> 3] & (1u << ((index >> 1) & 7)))) continue;
     uint8_t row = line - (ppu->oam[index] >> 8);
     int spriteSize = spriteSizes[PPU_objSize(ppu)][(ppu->highOam[index >> 3] >> ((index & 7) + 1)) & 1];
     int x = PpuDecodeOamX(ppu, index);
@@ -2608,6 +2645,7 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
               }
         // Lower OAM indices are processed later and overwrite higher ones.
                 dst[0] = z + pixel;
+                if (ppu->hostObjPixels) ppu->hostObjOwners[dst - ppu->objBuffer.data] = (uint8)slot;
             }
         }
         if(tilesFound > 34 &&
